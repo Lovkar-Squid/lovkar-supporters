@@ -79,7 +79,7 @@
       <thead><tr><th>Name</th><th>Tier</th><th>Aura</th><th>Colossi</th><th>Credits</th><th>Source</th><th>UUID</th><th>Note</th><th></th></tr></thead>
       <tbody id="rows"></tbody>
     </table>
-    <div class="foot">Mods read the public list at <code id="pub"></code> — no token needed there. It carries only salted hashes of the UUIDs and each supporter's aura, never names; names appear publicly only in <code>/credits.json</code>, and only for supporters who ticked the credits box. Auras are chosen on the page after linking (<code>/wwpatreon</code>), or here from the dropdown, and always checked against the tier.</div>
+    <div class="foot">Mods read the public list at <code id="pub"></code> — no token needed there. It carries only salted hashes of the UUIDs and each supporter's aura, never names; names appear publicly only in <code>/credits.json</code>, and only for supporters who ticked the credits box. Auras are chosen on the page after linking (<code>/wwpatreon</code>), or here from the dropdown, and always checked against the tier. A cancelled pledge is not cut off at once: the row keeps an <em>until</em> date - what Patreon says they paid through - and drops off the list by itself when that day passes.</div>
   </div>
 </main>
 <script>
@@ -122,7 +122,7 @@
       const colossus = (s.style && s.style.colossus) || 'none';
       tr.innerHTML =
         '<td>'+esc(s.name)+'</td>'+
-        '<td><span class="tier '+s.tier+'">'+s.tier+'</span></td>'+
+        '<td><span class="tier '+s.tier+'">'+s.tier+'</span>'+(s.expires?'<div class="uuid" title="pledge ended - perks run until this date">until '+esc(String(s.expires).slice(0,10))+'</div>':'')+'</td>'+
         '<td></td>'+
         '<td></td>'+
         '<td></td>'+

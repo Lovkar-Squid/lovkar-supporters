@@ -18,7 +18,9 @@
  *   POST /link/style          -> { token, aura, colossus, credits } saves the chooser (token from the callback page;
  *                                every choice is checked against the tier that paid for it)
  *   POST /api/me/cosmetics    -> { uuid, name, sid, aura?, colossus?, credits? } from the game: Mojang-verified, same checks
- *   POST /webhook/patreon     -> Patreon webhook, HMAC-verified, auto-syncs tiers
+ *   POST /webhook/patreon     -> Patreon webhook, HMAC-verified, auto-syncs tiers. A cancelled pledge does not
+ *                                strip the cosmetics at once: the entry keeps an "expires" date (what Patreon
+ *                                says they paid through) and falls off the list when that passes.
  *
  * Admin (header x-admin-token: <ADMIN_TOKEN>, or ?token=):
  *   GET    /                      -> admin web UI (public/admin.html)
@@ -236,6 +238,29 @@ function bestTierFromTitles(titles) {
   return best;
 }
 
+// --- when a pledge ends ---
+// A supporter has already paid for the period they are in, so the cosmetics run to the end of it
+// instead of stopping the moment they cancel. Patreon tells us the date: next_charge_date is what
+// they are paid through; last_charge_date + one period is the fallback when the pledge is already gone.
+const PERIOD_MS = 31 * 24 * 3600 * 1000;
+function paidThrough(attrs) {
+  const at = (v) => { const t = Date.parse(v || ''); return Number.isFinite(t) ? t : 0; };
+  const next = at(attrs && attrs.next_charge_date);
+  const last = at(attrs && attrs.last_charge_date);
+  const until = Math.max(next, last ? last + PERIOD_MS : 0);
+  return until > Date.now() ? new Date(until).toISOString() : null;
+}
+function expired(s) { const t = Date.parse(s.expires || ''); return Number.isFinite(t) && t <= Date.now(); }
+// Drop the entries whose paid-for time has run out. Cheap, so it runs before every read of the list.
+function sweepExpired() {
+  const gone = store.supporters.filter(expired);
+  if (!gone.length) return false;
+  store.supporters = store.supporters.filter((s) => !expired(s));
+  for (const s of gone) console.log(`[patreon] ${s.name} (${s.uuid}) pledge ended - perks expired`);
+  saveStore().catch((e) => console.error('[data] save after sweep failed:', e.message));
+  return true;
+}
+
 // Upsert a supporter identified by Minecraft uuid. Extra fields merged in. Keeps a valid style for the (new) tier.
 async function upsertSupporter({ uuid, name, tier, extra = {} }) {
   const uuidRaw = String(uuid).replace(/-/g, '').toLowerCase();
@@ -278,6 +303,7 @@ app.use(express.json({ limit: '64kb' }));
 
 // ---- public list the mods fetch: hashes, not names ----
 app.get('/supporters.json', (req, res) => {
+  sweepExpired();
   res.set('Access-Control-Allow-Origin', '*');
   res.set('Cache-Control', 'public, max-age=300');
   res.json({
@@ -290,6 +316,7 @@ app.get('/supporters.json', (req, res) => {
 
 // ---- the credits: only those who ticked the box ----
 app.get('/credits.json', (req, res) => {
+  sweepExpired();
   res.set('Access-Control-Allow-Origin', '*');
   res.set('Cache-Control', 'public, max-age=300');
   const credits = { titan: [], colossus: [], waker: [] };
@@ -471,7 +498,7 @@ app.get('/link/callback', async (req, res) => {
     // Fetch identity + memberships + entitled tiers
     const idUrl = 'https://www.patreon.com/api/oauth2/v2/identity?' + new URLSearchParams({
       include: 'memberships.currently_entitled_tiers',
-      'fields[member]': 'patron_status',
+      'fields[member]': 'patron_status,next_charge_date,last_charge_date',
       'fields[tier]': 'title',
     }).toString();
     const idRes = await fetch(idUrl, { headers: { authorization: 'Bearer ' + tok.access_token } });
@@ -487,11 +514,19 @@ app.get('/link/callback', async (req, res) => {
 
     if (!patreonUserId) throw new Error('no Patreon user id');
     if (!tier || !active) {
-      // Not an active patron on a mapped tier - make sure they aren't listed via Patreon.
+      // Not an active patron on a mapped tier. If they have paid time left, they keep the perks until it runs out.
       const existing = findByPatreonId(patreonUserId);
-      if (existing && existing.source === 'patreon') { store.supporters = store.supporters.filter((s) => s !== existing); await saveStore(); }
+      const member = members[0];
+      const until = existing && existing.source === 'patreon' ? (existing.expires || paidThrough(member && member.attributes)) : null;
+      if (existing && existing.source === 'patreon') {
+        if (until && Date.parse(until) > Date.now()) { existing.expires = until; existing.updated = new Date().toISOString(); await saveStore(); }
+        else { store.supporters = store.supporters.filter((s) => s !== existing); await saveStore(); }
+      }
+      const left = until && Date.parse(until) > Date.now()
+        ? `<p class="muted">Your pledge has ended, but you paid through <b>${esc(new Date(until).toISOString().slice(0, 10))}</b> - the cosmetics stay until then.</p>` : '';
       return res.status(200).send(page('No active pledge', `<div class="big">🙂</div><h1>No active pledge found</h1>
         <p class="muted">We couldn't find an active Waker / Colossus / Titan pledge on your Patreon. If you just pledged, give it a minute and try again.</p>
+        ${left}
         <p class="muted">The tiers are at <a href="${esc(PATREON_URL)}">${esc(PATREON_URL.replace(/^https?:\/\/(www\.)?/, ''))}</a> - every perk is cosmetic; the mod itself is free.</p>`));
     }
 
@@ -552,6 +587,7 @@ app.post('/api/me/cosmetics', async (req, res) => {
     }
   }
   if (!verified && REQUIRE_MC_VERIFY) return res.status(403).json({ error: "Mojang couldn't confirm your account (offline mode?). Log in with your Microsoft account and try again." });
+  sweepExpired();
   const s = findByUuid(uuidRaw);
   if (!s) return res.status(404).json({ error: 'This Minecraft account is not linked to a Patreon yet - run /wwpatreon to link it.' });
   let changed = false;
@@ -573,7 +609,7 @@ app.post('/api/me/cosmetics', async (req, res) => {
     await saveStore();
     console.log(`[me] ${s.name} (${s.uuid}) aura=${s.style.aura} colossus=${s.style.colossus} credits=${s.credits}`);
   }
-  res.json({ ok: true, ...publicEntry(s), credits: !!s.credits, name: s.name });
+  res.json({ ok: true, ...publicEntry(s), credits: !!s.credits, name: s.name, expires: s.expires || null });
 });
 
 // Step 3: Patreon webhook keeps tiers in sync (pledge create/update/delete).
@@ -602,11 +638,24 @@ app.post('/webhook/patreon', async (req, res) => {
     const existing = findByPatreonId(patreonUserId);
 
     if (trigger.includes('delete') || patronStatus === 'former_patron' || !tier) {
-      if (existing && existing.source === 'patreon') { store.supporters = store.supporters.filter((s) => s !== existing); await saveStore(); }
+      if (existing && existing.source === 'patreon') {
+        // They keep what they paid for: the perks run to the end of the period, then the sweep drops them.
+        const until = paidThrough(data.attributes);
+        if (until) {
+          existing.expires = until;
+          existing.updated = new Date().toISOString();
+          await saveStore();
+          console.log(`[patreon] ${existing.name} (${existing.uuid}) pledge ended - perks run until ${until}`);
+          return res.status(200).json({ ok: true, action: 'expires', expires: until });
+        }
+        store.supporters = store.supporters.filter((s) => s !== existing);
+        await saveStore();
+      }
       return res.status(200).json({ ok: true, action: 'removed' });
     }
     if (existing) {
       existing.tier = tier;
+      delete existing.expires; // pledging again cancels a pending end date
       existing.updated = new Date().toISOString();
       normalizeSupporter(existing); // a lowered tier loses auras it no longer unlocks
       await saveStore();
@@ -683,5 +732,6 @@ app.delete('/api/supporters/:key', requireAdmin, async (req, res) => {
 app.use(express.static(path.join(__dirname, 'public'), { index: 'admin.html' }));
 
 loadStore().then(() => {
+  setInterval(sweepExpired, 60 * 60 * 1000).unref?.(); // ended pledges fall off on their own
   app.listen(PORT, () => console.log(`[lovkar-supporters] listening on :${PORT}  (data ${DATA_FILE}, patreon ${PATREON_ENABLED ? 'ON' : 'OFF'}, mc-verify ${REQUIRE_MC_VERIFY ? 'ON' : 'OFF'})`));
 });

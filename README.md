@@ -24,6 +24,13 @@ cosmetic it chose per supporter. No gameplay data, nothing pay-to-win.
    verified) keeps tiers in sync afterwards; a lowered tier loses any aura it
    no longer unlocks.
 
+**When a pledge ends** the perks are not switched off on the spot. Patreon
+says what the supporter paid through (`next_charge_date`, or the last charge
+plus one period); the entry keeps that as `expires`, stays in the list with
+its tier until then, and is swept off when the date passes. Pledging again
+before that clears the date. A cancellation with nothing left to run is
+removed straight away, as before.
+
 The service is the only place a cosmetic is decided and checked. The mod has
 the service address compiled in, never lets a client pick for itself, and only
 draws what the list says.
@@ -44,6 +51,7 @@ Public (what the mods fetch):
 - `POST /link/style` → `{ token, aura, colossus, credits }` from the chooser page
   (the token is signed and short-lived; every choice is checked against the tier)
 - `POST /api/me/cosmetics` → `{ uuid, name, sid, aura?, colossus?, credits? }` from the game
+  (answers `expires` too when a pledge has ended and is running out its paid time)
   (`/wwpatreon aura <name>`, `/wwpatreon colossus <name>`, `/wwpatreon credits on|off`,
   `/wwpatreon status`): Mojang confirms the account via `sid`, the tier on file decides;
   answers the current entry, the credits flag and what is unlocked
