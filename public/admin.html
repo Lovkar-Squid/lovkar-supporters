@@ -76,10 +76,10 @@
       <button class="ghost" id="refresh">Refresh</button>
     </div>
     <table>
-      <thead><tr><th>Name</th><th>Tier</th><th>UUID</th><th>Note</th><th></th></tr></thead>
+      <thead><tr><th>Name</th><th>Tier</th><th>Aura</th><th>Credits</th><th>Source</th><th>UUID</th><th>Note</th><th></th></tr></thead>
       <tbody id="rows"></tbody>
     </table>
-    <div class="foot">Mods read the public list at <code id="pub"></code> — no token needed there.</div>
+    <div class="foot">Mods read the public list at <code id="pub"></code> — no token needed there. It carries only salted hashes of the UUIDs and each supporter's aura, never names; names appear publicly only in <code>/credits.json</code>, and only for supporters who ticked the credits box. Auras are chosen on the page after linking (<code>/wwpatreon</code>), or here from the dropdown, and always checked against the tier.</div>
   </div>
 </main>
 <script>
@@ -105,27 +105,53 @@
       if(r.status === 401){ flash($('auth-msg'), false, 'Token rejected.'); return; }
       const j = await r.json();
       flash($('auth-msg'), true, 'Connected. ' + j.supporters.length + ' supporter(s).');
+      auras = j.auras || [];
       render(j.supporters);
     }catch(e){ flash($('auth-msg'), false, 'Cannot reach the service: ' + e.message); }
   }
 
+  let auras = [];
+  const rank = { waker:1, colossus:2, titan:3 };
   function render(list){
     $('count').textContent = list.length;
     const tb = $('rows'); tb.innerHTML = '';
     list.sort((a,b)=>a.name.localeCompare(b.name)).forEach((s)=>{
       const tr = document.createElement('tr');
+      const aura = (s.style && s.style.aura) || '';
       tr.innerHTML =
         '<td>'+esc(s.name)+'</td>'+
         '<td><span class="tier '+s.tier+'">'+s.tier+'</span></td>'+
+        '<td></td>'+
+        '<td></td>'+
+        '<td class="uuid">'+esc(s.source||'')+(s.verified?' ✓':'')+'</td>'+
         '<td class="uuid">'+esc(s.uuid)+'</td>'+
         '<td>'+esc(s.note||'')+'</td>'+
         '<td style="text-align:right"></td>';
+      // aura dropdown: only what the tier unlocks
+      const sel = document.createElement('select'); sel.style.padding='4px 6px'; sel.style.fontSize='12px';
+      auras.filter(a=>a.rank <= (rank[s.tier]||0)).forEach(a=>{
+        const o = document.createElement('option'); o.value=a.id; o.textContent=a.name; if(a.id===aura) o.selected=true; sel.appendChild(o);
+      });
+      sel.onchange = ()=>patch(s.uuid, { aura: sel.value });
+      tr.children[2].appendChild(sel);
+      const ck = document.createElement('input'); ck.type='checkbox'; ck.checked=!!s.credits; ck.title='listed in /credits.json';
+      ck.onchange = ()=>patch(s.uuid, { credits: ck.checked });
+      tr.children[3].appendChild(ck);
       const btn = document.createElement('button');
       btn.className='del'; btn.textContent='remove';
       btn.onclick = ()=>remove(s.uuid, s.name);
       tr.lastElementChild.appendChild(btn);
       tb.appendChild(tr);
     });
+  }
+
+  async function patch(uuid, body){
+    try{
+      const r = await fetch('/api/supporters/'+encodeURIComponent(uuid), { method:'PATCH', headers: headers(), body: JSON.stringify(body) });
+      const j = await r.json();
+      if(!r.ok){ flash($('auth-msg'), false, j.error||('error '+r.status)); return; }
+      flash($('auth-msg'), true, 'Saved '+j.supporter.name+': '+j.supporter.aura+(j.supporter.credits?' (in credits)':''));
+    }catch(e){ flash($('auth-msg'), false, e.message); }
   }
   function esc(s){ return String(s).replace(/[&<>"]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
 

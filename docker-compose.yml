@@ -23,6 +23,8 @@ services:
       PATREON_CLIENT_SECRET: "${PATREON_CLIENT_SECRET:-}"
       PATREON_WEBHOOK_SECRET: "${PATREON_WEBHOOK_SECRET:-}"
       PUBLIC_BASE_URL: "${PUBLIC_BASE_URL:-https://supporters.lovkarsquid.com}"
+      REQUIRE_MC_VERIFY: "${REQUIRE_MC_VERIFY:-1}"
+      LINK_SECRET: "${LINK_SECRET:-}"
     volumes:
       - lovkar-supporters-data:/data
     healthcheck:

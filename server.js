@@ -3,14 +3,21 @@
 /*
  * lovkar-supporters
  * Holds the list of Patreon supporters for Lovkar's Minecraft mods and serves it
- * so the mods can grant COSMETIC-ONLY in-game perks.
+ * so the mods can grant COSMETIC-ONLY in-game perks. Nothing here touches gameplay.
  *
  * Public:
- *   GET  /supporters.json     -> { updated, supporters: [ { uuid, name, tier } ] }
+ *   GET  /supporters.json     -> { v: 2, salt, supporters: [ { h, tier, aura } ] }
+ *                                h = sha256(salt + ":" + uuid) - the list names nobody; a mod
+ *                                hashes the players it meets and looks them up.
+ *   GET  /credits.json        -> names of supporters who OPTED IN to be credited, by tier
  *   GET  /healthz             -> { ok, count, patreon }
- *   GET  /link/start          -> begins Patreon linking (mod opens this in a browser)
- *   GET  /link/callback       -> Patreon OAuth callback (stores UUID<->tier)
- *   POST /webhook/patreon      -> Patreon webhook, HMAC-verified, auto-syncs tiers
+ *   GET  /link/start          -> begins Patreon linking (the mod opens this in a browser, after
+ *                                telling Mojang's session server it is "joining" a one-off server id;
+ *                                we ask Mojang whether that account really did -> proof of ownership)
+ *   GET  /link/callback       -> Patreon OAuth callback: stores UUID<->tier, shows the aura chooser
+ *   POST /link/style          -> { token, aura, credits } saves the chooser (token from the callback page;
+ *                                the aura is checked against the tier that paid for it)
+ *   POST /webhook/patreon     -> Patreon webhook, HMAC-verified, auto-syncs tiers
  *
  * Admin (header x-admin-token: <ADMIN_TOKEN>, or ?token=):
  *   GET    /                      -> admin web UI (public/admin.html)
@@ -32,6 +39,26 @@ const DATA_FILE = path.join(DATA_DIR, 'supporters.json');
 const ADMIN_TOKEN = process.env.ADMIN_TOKEN || '';
 const TIERS = ['waker', 'colossus', 'titan']; // ascending rank; free tier gets no in-game perk
 const TIER_RANK = { waker: 1, colossus: 2, titan: 3 };
+const TIER_LABEL = { waker: 'Waker', colossus: 'Colossus', titan: 'Titan' };
+
+// The cosmetics catalogue. Mirrored in the mod (AuraStyle.java) - the mod draws, this decides.
+// rank = the tier that unlocks it; a higher tier may wear anything below it. "none" is always allowed.
+const AURAS = [
+  { id: 'none', rank: 0, name: 'No aura', blurb: 'Keep it quiet - no aura at all.', color: '#8a97a6', pattern: '' },
+  { id: 'waker', rank: 1, name: "Waker's Runes", blurb: 'Soft green glyphs rising round your feet.', color: '#5CFF3C', pattern: 'runes' },
+  { id: 'colossus', rank: 2, name: 'Colossus Sigil', blurb: 'Glyphs orbit your feet; a ring of light races out every few seconds.', color: '#FF9628', pattern: 'sigil + ring' },
+  { id: 'stone', rank: 2, name: 'Stone Sigil', blurb: 'The sigil in the pale grey of the hill colossi.', color: '#D8CFC0', pattern: 'sigil + ring' },
+  { id: 'earth', rank: 2, name: 'Earth Sigil', blurb: 'The sigil in the warm brown of the earth colossi.', color: '#B8843C', pattern: 'sigil + ring' },
+  { id: 'sandstone', rank: 2, name: 'Sandstone Sigil', blurb: 'The sigil in desert gold.', color: '#F2D27A', pattern: 'sigil + ring' },
+  { id: 'ice', rank: 2, name: 'Ice Sigil', blurb: 'The sigil in glacier blue.', color: '#A6E6FF', pattern: 'sigil + ring' },
+  { id: 'prismarine', rank: 2, name: 'Prismarine Sigil', blurb: 'The sigil in the sea-green of the deep.', color: '#62D8C8', pattern: 'sigil + ring' },
+  { id: 'moss', rank: 2, name: 'Moss Sigil', blurb: 'The sigil in living green.', color: '#8CE664', pattern: 'sigil + ring' },
+  { id: 'titan', rank: 3, name: "Titan's Void", blurb: 'The sigil in void purple, a twin pulse, embers boiling up from the ground.', color: '#B266FF', pattern: 'sigil + twin ring + embers' },
+  { id: 'crown', rank: 3, name: 'Waking Crown', blurb: 'A halo of gold glyphs turning above your head, shedding embers.', color: '#FFD86A', pattern: 'crown halo + embers' },
+];
+const AURA_BY_ID = Object.fromEntries(AURAS.map((a) => [a.id, a]));
+function defaultAura(tier) { return TIER_RANK[tier] >= 3 ? 'titan' : TIER_RANK[tier] === 2 ? 'colossus' : 'waker'; }
+function auraAllowed(tier, auraId) { const a = AURA_BY_ID[auraId]; return !!a && a.rank <= (TIER_RANK[tier] || 0); }
 
 // --- Patreon config (all optional; linking is disabled until these are set) ---
 const PATREON_CLIENT_ID = process.env.PATREON_CLIENT_ID || '';
@@ -40,6 +67,11 @@ const PATREON_WEBHOOK_SECRET = process.env.PATREON_WEBHOOK_SECRET || '';
 const PUBLIC_BASE_URL = (process.env.PUBLIC_BASE_URL || 'https://supporters.lovkarsquid.com').replace(/\/+$/, '');
 // Map a Patreon tier TITLE (lower-cased) to our key. Titles: Waker / Colossus / Titan.
 const TITLE_TO_TIER = { waker: 'waker', colossus: 'colossus', titan: 'titan' };
+// Proof of Minecraft-account ownership via Mojang's session server. On by default; set REQUIRE_MC_VERIFY=0 for offline dev.
+const REQUIRE_MC_VERIFY = (process.env.REQUIRE_MC_VERIFY || '1') !== '0';
+// Signs the short-lived tokens the chooser page uses. Random per boot unless pinned (tokens live 30 minutes anyway).
+const LINK_SECRET = process.env.LINK_SECRET || crypto.randomBytes(32).toString('hex');
+const TOKEN_TTL_MS = 30 * 60 * 1000;
 
 if (!ADMIN_TOKEN || ADMIN_TOKEN.length < 12) {
   console.error('[fatal] ADMIN_TOKEN env var is required and must be at least 12 characters.');
@@ -49,8 +81,9 @@ const PATREON_ENABLED = !!(PATREON_CLIENT_ID && PATREON_CLIENT_SECRET);
 
 // ---------- storage ----------
 function emptyStore() {
-  return { updated: new Date().toISOString(), supporters: [] };
+  return { updated: new Date().toISOString(), salt: newSalt(), supporters: [] };
 }
+function newSalt() { return crypto.randomBytes(16).toString('base64url'); }
 let store = emptyStore();
 
 async function loadStore() {
@@ -60,7 +93,10 @@ async function loadStore() {
     const parsed = JSON.parse(raw);
     if (parsed && Array.isArray(parsed.supporters)) {
       store = parsed;
+      if (!store.salt) { store.salt = newSalt(); console.log('[data] added a hashing salt'); }
+      for (const s of store.supporters) normalizeSupporter(s);
       console.log(`[data] loaded ${store.supporters.length} supporter(s) from ${DATA_FILE}`);
+      await saveStore();
       return;
     }
     console.warn('[data] file present but malformed - starting empty');
@@ -81,6 +117,15 @@ async function saveStore() {
     await fsp.rename(tmp, DATA_FILE);
   }).catch((e) => console.error('[data] save failed:', e.message));
   return saving;
+}
+
+// Older records (before styles) and any drift: give every supporter a valid style for their tier.
+function normalizeSupporter(s) {
+  if (!s.style || typeof s.style !== 'object') s.style = {};
+  if (!s.style.aura || !auraAllowed(s.tier, s.style.aura)) s.style.aura = defaultAura(s.tier);
+  if (typeof s.credits !== 'boolean') s.credits = false;
+  if (typeof s.verified !== 'boolean') s.verified = s.source === 'manual';
+  return s;
 }
 
 // ---------- helpers ----------
@@ -106,19 +151,59 @@ function requireAdmin(req, res, next) {
 function validUuid(u) { return /^[0-9a-fA-F]{8}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{12}$/.test(String(u)); }
 function findByUuid(raw) { const h = String(raw).replace(/-/g, '').toLowerCase(); return store.supporters.find((s) => s.uuidRaw === h); }
 function findByPatreonId(pid) { return store.supporters.find((s) => s.patreonUserId && s.patreonUserId === String(pid)); }
+function esc(s) { return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
+
+// What the public list publishes for a supporter: hex sha256 of "salt:uuid" (lower-case, dashed uuid).
+function hashOf(uuidRaw) {
+  return crypto.createHash('sha256').update(store.salt + ':' + dashUuid(uuidRaw)).digest('hex');
+}
+
+// Short-lived signed token binding the chooser page to one Minecraft account.
+function makeToken(uuidRaw) {
+  const exp = Date.now() + TOKEN_TTL_MS;
+  const body = `${uuidRaw}.${exp}`;
+  const sig = crypto.createHmac('sha256', LINK_SECRET).update(body).digest('base64url');
+  return `${body}.${sig}`;
+}
+function readToken(token) {
+  const parts = String(token || '').split('.');
+  if (parts.length !== 3) return null;
+  const [uuidRaw, expStr, sig] = parts;
+  if (!/^[0-9a-f]{32}$/.test(uuidRaw) || !/^\d+$/.test(expStr)) return null;
+  const expected = crypto.createHmac('sha256', LINK_SECRET).update(`${uuidRaw}.${expStr}`).digest('base64url');
+  if (!safeEqual(sig, expected)) return null;
+  if (Date.now() > parseInt(expStr, 10)) return null;
+  return uuidRaw;
+}
+
+async function fetchJson(url, opts = {}, timeoutMs = 8000) {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    const r = await fetch(url, { ...opts, signal: ctrl.signal, headers: { accept: 'application/json', ...(opts.headers || {}) } });
+    return r;
+  } finally { clearTimeout(t); }
+}
 
 async function resolveMojang(name) {
-  const url = 'https://api.mojang.com/users/profiles/minecraft/' + encodeURIComponent(name);
-  const ctrl = new AbortController();
-  const t = setTimeout(() => ctrl.abort(), 8000);
-  try {
-    const r = await fetch(url, { signal: ctrl.signal, headers: { accept: 'application/json' } });
-    if (r.status === 404 || r.status === 204) return null;
-    if (!r.ok) throw new Error('Mojang API returned ' + r.status);
-    const j = await r.json();
-    if (!j || !j.id) return null;
-    return { uuidRaw: j.id.toLowerCase(), uuid: dashUuid(j.id), name: j.name };
-  } finally { clearTimeout(t); }
+  const r = await fetchJson('https://api.mojang.com/users/profiles/minecraft/' + encodeURIComponent(name));
+  if (r.status === 404 || r.status === 204) return null;
+  if (!r.ok) throw new Error('Mojang API returned ' + r.status);
+  const j = await r.json();
+  if (!j || !j.id) return null;
+  return { uuidRaw: j.id.toLowerCase(), uuid: dashUuid(j.id), name: j.name };
+}
+
+// Did this account just "join" the one-off server id the mod made up? That is the same handshake every
+// multiplayer login does, and only a client logged into that account can perform it.
+async function verifyMojangJoin(name, serverId) {
+  const url = 'https://sessionserver.mojang.com/session/minecraft/hasJoined?' + new URLSearchParams({ username: name, serverId }).toString();
+  const r = await fetchJson(url);
+  if (r.status === 204) return null;
+  if (!r.ok) throw new Error('Mojang session server returned ' + r.status);
+  const j = await r.json();
+  if (!j || !j.id) return null;
+  return { uuidRaw: String(j.id).replace(/-/g, '').toLowerCase(), name: j.name || name };
 }
 
 // Choose the highest-ranked tier key from a list of Patreon tier titles.
@@ -131,7 +216,7 @@ function bestTierFromTitles(titles) {
   return best;
 }
 
-// Upsert a supporter identified by Minecraft uuid. Extra fields merged in.
+// Upsert a supporter identified by Minecraft uuid. Extra fields merged in. Keeps a valid style for the (new) tier.
 async function upsertSupporter({ uuid, name, tier, extra = {} }) {
   const uuidRaw = String(uuid).replace(/-/g, '').toLowerCase();
   const now = new Date().toISOString();
@@ -145,8 +230,22 @@ async function upsertSupporter({ uuid, name, tier, extra = {} }) {
     s = { uuid: dashUuid(uuid), uuidRaw, name: name || '', tier, note: '', source: 'manual', added: now, updated: now, ...extra };
     store.supporters.push(s);
   }
+  normalizeSupporter(s);
   await saveStore();
   return s;
+}
+
+// A very small per-IP limiter for the endpoints that call out to Mojang/Patreon.
+const hits = new Map();
+function limited(req, key, max, windowMs) {
+  const now = Date.now();
+  const k = key + '|' + (req.ip || 'x');
+  const h = hits.get(k) || [];
+  const recent = h.filter((t) => now - t < windowMs);
+  recent.push(now);
+  hits.set(k, recent);
+  if (hits.size > 5000) for (const [kk, v] of hits) if (!v.some((t) => now - t < windowMs)) hits.delete(kk);
+  return recent.length > max;
 }
 
 // ---------- app ----------
@@ -157,43 +256,154 @@ app.set('trust proxy', true);
 app.use('/webhook/patreon', express.raw({ type: '*/*', limit: '256kb' }));
 app.use(express.json({ limit: '64kb' }));
 
-// ---- public list the mods fetch ----
+// ---- public list the mods fetch: hashes, not names ----
 app.get('/supporters.json', (req, res) => {
   res.set('Access-Control-Allow-Origin', '*');
   res.set('Cache-Control', 'public, max-age=300');
-  res.json({ updated: store.updated, supporters: store.supporters.map((s) => ({ uuid: s.uuid, name: s.name, tier: s.tier })) });
+  res.json({
+    v: 2,
+    updated: store.updated,
+    salt: store.salt,
+    supporters: store.supporters.map((s) => ({ h: hashOf(s.uuidRaw), tier: s.tier, aura: s.style.aura })),
+  });
+});
+
+// ---- the credits: only those who ticked the box ----
+app.get('/credits.json', (req, res) => {
+  res.set('Access-Control-Allow-Origin', '*');
+  res.set('Cache-Control', 'public, max-age=300');
+  const credits = { titan: [], colossus: [], waker: [] };
+  for (const s of store.supporters) if (s.credits && s.name && credits[s.tier]) credits[s.tier].push(s.name);
+  for (const k of Object.keys(credits)) credits[k].sort((a, b) => a.localeCompare(b));
+  res.json({ updated: store.updated, credits });
 });
 
 app.get('/healthz', (req, res) => {
-  res.json({ ok: true, count: store.supporters.length, updated: store.updated, patreon: PATREON_ENABLED });
+  res.json({ ok: true, count: store.supporters.length, updated: store.updated, patreon: PATREON_ENABLED, verify: REQUIRE_MC_VERIFY });
 });
 
 // ---------- Patreon linking ----------
-const linkStates = new Map(); // state -> { uuidRaw, uuid, name, ts }
+const linkStates = new Map(); // state -> { uuidRaw, uuid, name, verified, ts }
 function newState() { return crypto.randomBytes(24).toString('base64url'); }
 function pruneStates() { const cutoff = Date.now() - 10 * 60 * 1000; for (const [k, v] of linkStates) if (v.ts < cutoff) linkStates.delete(k); }
 
-function page(title, bodyHtml) {
-  return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${title}</title>
-<style>body{margin:0;background:#0b0e12;color:#e8edf2;font:16px/1.6 system-ui,Segoe UI,Roboto,sans-serif;display:flex;min-height:100vh;align-items:center;justify-content:center}
-.card{max-width:520px;padding:34px;background:#141a21;border:1px solid #232d38;border-radius:14px;text-align:center;margin:20px}
+const PAGE_CSS = `body{margin:0;background:#0b0e12;color:#e8edf2;font:16px/1.6 system-ui,Segoe UI,Roboto,sans-serif;display:flex;min-height:100vh;align-items:center;justify-content:center}
+.card{max-width:560px;padding:34px;background:#141a21;border:1px solid #232d38;border-radius:14px;text-align:center;margin:20px}
 h1{margin:0 0 10px;font-size:22px}.t{font-weight:800;text-transform:uppercase;letter-spacing:.5px}
-.waker{color:#39ff14}.colossus{color:#ff9628}.titan{color:#be5aff}.muted{color:#8a97a6}.big{font-size:40px;margin-bottom:6px}</style>
-</head><body><div class="card">${bodyHtml}</div></body></html>`;
+.waker{color:#39ff14}.colossus{color:#ff9628}.titan{color:#be5aff}.muted{color:#8a97a6}.big{font-size:40px;margin-bottom:6px}
+code{background:#0e141a;border:1px solid #232d38;border-radius:5px;padding:1px 6px}`;
+
+function page(title, bodyHtml) {
+  return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(title)}</title>
+<style>${PAGE_CSS}</style></head><body><div class="card">${bodyHtml}</div></body></html>`;
 }
 
-// Step 1: the mod opens this with the player's uuid (+ name). We stash it and bounce to Patreon.
-app.get('/link/start', (req, res) => {
+// The page after a successful link: pick an aura (only what the tier unlocks), opt into the credits.
+function chooserPage(s, token) {
+  const rank = TIER_RANK[s.tier] || 0;
+  const ctx = { token, tier: s.tier, tierLabel: TIER_LABEL[s.tier], rank, name: s.name, aura: s.style.aura, credits: !!s.credits,
+    auras: AURAS.map((a) => ({ ...a, locked: a.rank > rank, needs: TIER_LABEL[TIERS[a.rank - 1]] || '' })) };
+  const json = JSON.stringify(ctx).replace(/</g, '\\u003c');
+  return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Linked - choose your aura</title>
+<style>${PAGE_CSS}
+body{align-items:flex-start}.card{max-width:760px;text-align:left}
+.head{text-align:center}.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:12px;margin:18px 0}
+.opt{position:relative;display:block;padding:14px 14px 12px 56px;background:#0e141a;border:1px solid #232d38;border-radius:12px;cursor:pointer;transition:border-color .15s,box-shadow .15s}
+.opt:hover{border-color:#3a4a5c}.opt input{position:absolute;opacity:0;pointer-events:none}
+.opt.sel{border-color:var(--c);box-shadow:0 0 0 1px var(--c),0 0 24px -8px var(--c)}
+.opt.locked{opacity:.45;cursor:not-allowed}.opt.locked:hover{border-color:#232d38}
+.sw{position:absolute;left:14px;top:16px;width:30px;height:30px;border-radius:50%;background:var(--c);box-shadow:0 0 16px var(--c)}
+.opt.none .sw{background:transparent;border:2px dashed #3a4a5c;box-shadow:none}
+.nm{font-weight:700;font-size:15px}.bl{color:#8a97a6;font-size:13px;line-height:1.45;margin-top:2px}
+.tag{display:inline-block;font-size:11px;font-weight:800;letter-spacing:.4px;text-transform:uppercase;padding:1px 7px;border-radius:999px;background:#1b232c;margin-top:8px}
+.lock{position:absolute;right:12px;top:12px;font-size:13px}
+.row{display:flex;gap:14px;align-items:center;justify-content:space-between;flex-wrap:wrap;margin-top:6px}
+label.ck{display:flex;gap:10px;align-items:flex-start;color:#c9d3de;font-size:14px;cursor:pointer;max-width:460px}
+label.ck input{margin-top:5px;width:16px;height:16px}
+button{cursor:pointer;border:0;border-radius:9px;padding:11px 22px;font-size:15px;font-weight:700;background:#39c6ff;color:#04212e}
+button:disabled{opacity:.55;cursor:default}
+.msg{margin-top:14px;padding:10px 12px;border-radius:9px;font-size:14px;display:none}
+.msg.ok{display:block;background:#0f2a16;color:#8effa6;border:1px solid #1c5a2e}.msg.err{display:block;background:#2a0f12;color:#ff9aa2;border:1px solid #5a1c22}
+.fine{color:#6f7d8c;font-size:12px;margin-top:18px;text-align:center}
+</style></head><body><div class="card">
+<div class="head"><div class="big">🗿</div>
+<h1>Linked — welcome, <span class="t ${esc(s.tier)}">${esc(TIER_LABEL[s.tier] || s.tier)}</span>!</h1>
+<p>Your Minecraft account <b>${esc(s.name || s.uuid)}</b> is connected to your Patreon. Thank you for keeping the world waking.</p>
+<p class="muted" style="margin-top:-6px">Now choose your aura. Everything here is purely cosmetic - it changes nothing about the game itself.</p></div>
+<div id="grid" class="grid"></div>
+<div class="row">
+  <label class="ck"><input type="checkbox" id="credits"><span>List my Minecraft name in the <b>supporter credits</b> (public). Off by default - nobody's name is published unless they tick this.</span></label>
+  <button id="save">Save</button>
+</div>
+<div id="msg" class="msg"></div>
+<p class="fine">Changes show in game within about five minutes. To change your aura later, run <code>/wwpatreon</code> in the game again. Locked auras belong to higher tiers - upgrading on Patreon unlocks them.</p>
+</div>
+<script>
+const CTX = ${json};
+const grid = document.getElementById('grid');
+let chosen = CTX.aura;
+function draw(){
+  grid.innerHTML = '';
+  for (const a of CTX.auras) {
+    const el = document.createElement('label');
+    el.className = 'opt' + (a.locked ? ' locked' : '') + (a.id === chosen ? ' sel' : '') + (a.id === 'none' ? ' none' : '');
+    el.style.setProperty('--c', a.color);
+    el.innerHTML = '<span class="sw"></span><div class="nm">' + a.name + '</div><div class="bl">' + a.blurb + (a.pattern ? ' <i>(' + a.pattern + ')</i>' : '') + '</div>'
+      + (a.rank > 0 ? '<span class="tag ' + ['','waker','colossus','titan'][a.rank] + '">' + a.needs + (a.locked ? ' tier' : '') + '</span>' : '')
+      + (a.locked ? '<span class="lock">🔒</span>' : '');
+    if (!a.locked) el.onclick = () => { chosen = a.id; draw(); };
+    grid.appendChild(el);
+  }
+}
+draw();
+document.getElementById('credits').checked = CTX.credits;
+const msg = document.getElementById('msg');
+document.getElementById('save').onclick = async () => {
+  const btn = document.getElementById('save'); btn.disabled = true; msg.className = 'msg';
+  try {
+    const r = await fetch('/link/style', { method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ token: CTX.token, aura: chosen, credits: document.getElementById('credits').checked }) });
+    const j = await r.json();
+    if (!r.ok) { msg.className = 'msg err'; msg.textContent = j.error || ('error ' + r.status); }
+    else { msg.className = 'msg ok'; msg.textContent = 'Saved: ' + (CTX.auras.find(a => a.id === j.aura) || {}).name + (j.credits ? ' - and you are in the credits.' : '.') + ' See you in the game!'; }
+  } catch (e) { msg.className = 'msg err'; msg.textContent = 'Could not save: ' + e.message; }
+  btn.disabled = false;
+};
+</script></body></html>`;
+}
+
+// Step 1: the mod opens this with the player's uuid, name and the one-off Mojang server id. We verify, stash, and bounce to Patreon.
+app.get('/link/start', async (req, res) => {
   if (!PATREON_ENABLED) {
     return res.status(503).send(page('Linking not set up', `<div class="big">🗿</div><h1>Patreon linking isn't set up yet</h1>
       <p class="muted">The server owner still needs to add the Patreon app. Try again later, or ask in Discord.</p>`));
   }
+  if (limited(req, 'start', 12, 60 * 1000)) return res.status(429).send(page('Slow down', '<h1>Too many attempts</h1><p class="muted">Wait a minute and try again.</p>'));
   const uuid = String(req.query.uuid || '');
-  const name = String(req.query.name || '').slice(0, 16);
+  let name = String(req.query.name || '').slice(0, 16);
+  const sid = String(req.query.sid || '');
   if (!validUuid(uuid)) return res.status(400).send(page('Bad request', '<h1>Missing or invalid Minecraft UUID</h1>'));
+  const uuidRaw = uuid.replace(/-/g, '').toLowerCase();
+
+  let verified = false;
+  if (/^[0-9a-f]{16,64}$/i.test(sid) && /^[A-Za-z0-9_]{1,16}$/.test(name)) {
+    try {
+      const j = await verifyMojangJoin(name, sid);
+      if (j && j.uuidRaw === uuidRaw) { verified = true; name = j.name; }
+      else console.warn(`[link] Mojang did not confirm ${name} (${uuidRaw})`);
+    } catch (e) {
+      console.warn('[link] Mojang session check failed:', e.message);
+    }
+  }
+  if (!verified && REQUIRE_MC_VERIFY) {
+    return res.status(403).send(page("Couldn't verify your Minecraft account", `<div class="big">🛡️</div><h1>We couldn't confirm that's your Minecraft account</h1>
+      <p class="muted">Linking only works from the game, logged in with your Microsoft account (not offline mode), with the current version of the mod.
+      Go back to the game and run <code>/wwpatreon</code> again. If it keeps failing, ask in Discord.</p>`));
+  }
+
   pruneStates();
   const state = newState();
-  linkStates.set(state, { uuidRaw: uuid.replace(/-/g, '').toLowerCase(), uuid: dashUuid(uuid), name, ts: Date.now() });
+  linkStates.set(state, { uuidRaw, uuid: dashUuid(uuid), name, verified, ts: Date.now() });
   const authUrl = 'https://www.patreon.com/oauth2/authorize?' + new URLSearchParams({
     response_type: 'code',
     client_id: PATREON_CLIENT_ID,
@@ -211,7 +421,7 @@ app.get('/link/callback', async (req, res) => {
     const code = String(req.query.code || '');
     const state = String(req.query.state || '');
     const st = linkStates.get(state);
-    if (!code || !st) return res.status(400).send(page('Link expired', '<div class="big">⏳</div><h1>This link expired</h1><p class="muted">Start again from the game.</p>'));
+    if (!code || !st) return res.status(400).send(page('Link expired', '<div class="big">⏳</div><h1>This link expired</h1><p class="muted">Start again from the game with <code>/wwpatreon</code>.</p>'));
     linkStates.delete(state);
 
     // Exchange the code for an access token
@@ -253,18 +463,35 @@ app.get('/link/callback', async (req, res) => {
         <p class="muted">We couldn't find an active Waker / Colossus / Titan pledge on your Patreon. If you just pledged, give it a minute and try again.</p>`));
     }
 
-    // Detach this Patreon id from any other MC account, then link to this one.
+    // Detach this Patreon id from any other MC account, then link to this one (keeping a chosen style if the account already had one).
     const prior = findByPatreonId(patreonUserId);
     if (prior && prior.uuidRaw !== st.uuidRaw) { store.supporters = store.supporters.filter((s) => s !== prior); }
-    const s = await upsertSupporter({ uuid: st.uuid, name: st.name, tier, extra: { source: 'patreon', patreonUserId, linkedAt: new Date().toISOString() } });
+    const s = await upsertSupporter({ uuid: st.uuid, name: st.name, tier, extra: { source: 'patreon', patreonUserId, verified: !!st.verified, linkedAt: new Date().toISOString() } });
+    console.log(`[patreon] linked ${s.name} (${s.uuid}) tier=${tier} verified=${s.verified}`);
 
-    return res.status(200).send(page('Linked!', `<div class="big">🗿</div><h1>Linked — welcome, <span class="t ${s.tier}">${s.tier}</span>!</h1>
-      <p>Your Minecraft account <b>${s.name || s.uuid}</b> is now connected to your Patreon.</p>
-      <p class="muted">Your in-game perks will appear shortly. You can close this tab and return to the game.</p>`));
+    return res.status(200).send(chooserPage(s, makeToken(s.uuidRaw)));
   } catch (e) {
     console.error('[patreon] callback error:', e.message);
-    return res.status(500).send(page('Something went wrong', `<div class="big">⚠️</div><h1>Linking failed</h1><p class="muted">${e.message}. Please try again from the game.</p>`));
+    return res.status(500).send(page('Something went wrong', `<div class="big">⚠️</div><h1>Linking failed</h1><p class="muted">${esc(e.message)}. Please try again from the game.</p>`));
   }
+});
+
+// Step 2b: the chooser saves. The token names the account; the tier on file decides what it may wear.
+app.post('/link/style', async (req, res) => {
+  if (limited(req, 'style', 30, 60 * 1000)) return res.status(429).json({ error: 'too many requests' });
+  const uuidRaw = readToken(req.body && req.body.token);
+  if (!uuidRaw) return res.status(401).json({ error: 'This page has expired - run /wwpatreon in the game again.' });
+  const s = findByUuid(uuidRaw);
+  if (!s) return res.status(404).json({ error: 'No supporter record for this account any more.' });
+  const aura = String((req.body && req.body.aura) || '').trim().toLowerCase();
+  if (!AURA_BY_ID[aura]) return res.status(400).json({ error: 'Unknown aura.' });
+  if (!auraAllowed(s.tier, aura)) return res.status(403).json({ error: `${AURA_BY_ID[aura].name} needs the ${TIER_LABEL[TIERS[AURA_BY_ID[aura].rank - 1]]} tier.` });
+  s.style.aura = aura;
+  s.credits = !!(req.body && req.body.credits === true);
+  s.updated = new Date().toISOString();
+  await saveStore();
+  console.log(`[style] ${s.name} (${s.uuid}) aura=${aura} credits=${s.credits}`);
+  res.json({ ok: true, aura: s.style.aura, credits: s.credits });
 });
 
 // Step 3: Patreon webhook keeps tiers in sync (pledge create/update/delete).
@@ -296,7 +523,13 @@ app.post('/webhook/patreon', async (req, res) => {
       if (existing && existing.source === 'patreon') { store.supporters = store.supporters.filter((s) => s !== existing); await saveStore(); }
       return res.status(200).json({ ok: true, action: 'removed' });
     }
-    if (existing) { existing.tier = tier; existing.updated = new Date().toISOString(); await saveStore(); return res.status(200).json({ ok: true, action: 'updated', tier }); }
+    if (existing) {
+      existing.tier = tier;
+      existing.updated = new Date().toISOString();
+      normalizeSupporter(existing); // a lowered tier loses auras it no longer unlocks
+      await saveStore();
+      return res.status(200).json({ ok: true, action: 'updated', tier });
+    }
     // No prior MC link for this patron yet (they pledged but haven't linked in-game): nothing to apply.
     return res.status(200).json({ ok: true, note: 'no linked MC account yet' });
   } catch (e) {
@@ -306,7 +539,7 @@ app.post('/webhook/patreon', async (req, res) => {
 });
 
 // ---------- admin ----------
-app.get('/api/supporters', requireAdmin, (req, res) => res.json({ updated: store.updated, supporters: store.supporters }));
+app.get('/api/supporters', requireAdmin, (req, res) => res.json({ updated: store.updated, auras: AURAS, supporters: store.supporters }));
 
 app.post('/api/supporters', requireAdmin, async (req, res) => {
   const name = (req.body && req.body.name ? String(req.body.name) : '').trim();
@@ -318,9 +551,34 @@ app.post('/api/supporters', requireAdmin, async (req, res) => {
   try { profile = await resolveMojang(name); }
   catch (e) { return res.status(502).json({ error: 'could not reach Mojang: ' + e.message }); }
   if (!profile) return res.status(404).json({ error: 'no Minecraft account named "' + name + '"' });
-  const s = await upsertSupporter({ uuid: profile.uuid, name: profile.name, tier, extra: { note, source: 'manual' } });
+  const s = await upsertSupporter({ uuid: profile.uuid, name: profile.name, tier, extra: { note, source: 'manual', verified: true } });
   console.log(`[admin] upsert ${profile.name} (${profile.uuid}) tier=${tier}`);
-  res.json({ ok: true, supporter: { uuid: s.uuid, name: s.name, tier: s.tier } });
+  res.json({ ok: true, supporter: { uuid: s.uuid, name: s.name, tier: s.tier, aura: s.style.aura } });
+});
+
+// Admin: set a supporter's aura / credits by hand (same tier check as the chooser).
+app.patch('/api/supporters/:key', requireAdmin, async (req, res) => {
+  const key = String(req.params.key || '').toLowerCase();
+  const s = store.supporters.find((x) => x.uuid.toLowerCase() === key || x.uuidRaw === key || (x.name || '').toLowerCase() === key);
+  if (!s) return res.status(404).json({ error: 'no supporter matched "' + req.params.key + '"' });
+  if (req.body && typeof req.body.aura === 'string') {
+    const aura = req.body.aura.trim().toLowerCase();
+    if (!AURA_BY_ID[aura]) return res.status(400).json({ error: 'unknown aura' });
+    if (!auraAllowed(s.tier, aura)) return res.status(403).json({ error: 'that aura is above this supporter\'s tier' });
+    s.style.aura = aura;
+  }
+  if (req.body && typeof req.body.credits === 'boolean') s.credits = req.body.credits;
+  s.updated = new Date().toISOString();
+  await saveStore();
+  res.json({ ok: true, supporter: { uuid: s.uuid, name: s.name, tier: s.tier, aura: s.style.aura, credits: s.credits } });
+});
+
+// Admin: see the chooser page as a given supporter would (the token it carries is real, so saves from it apply).
+app.get('/api/chooser/:key', requireAdmin, (req, res) => {
+  const key = String(req.params.key || '').toLowerCase();
+  const s = store.supporters.find((x) => x.uuid.toLowerCase() === key || x.uuidRaw === key || (x.name || '').toLowerCase() === key);
+  if (!s) return res.status(404).send(page('Not found', '<h1>No such supporter</h1>'));
+  res.send(chooserPage(s, makeToken(s.uuidRaw)));
 });
 
 app.delete('/api/supporters/:key', requireAdmin, async (req, res) => {
@@ -337,5 +595,5 @@ app.delete('/api/supporters/:key', requireAdmin, async (req, res) => {
 app.use(express.static(path.join(__dirname, 'public'), { index: 'admin.html' }));
 
 loadStore().then(() => {
-  app.listen(PORT, () => console.log(`[lovkar-supporters] listening on :${PORT}  (data ${DATA_FILE}, patreon ${PATREON_ENABLED ? 'ON' : 'OFF'})`));
+  app.listen(PORT, () => console.log(`[lovkar-supporters] listening on :${PORT}  (data ${DATA_FILE}, patreon ${PATREON_ENABLED ? 'ON' : 'OFF'}, mc-verify ${REQUIRE_MC_VERIFY ? 'ON' : 'OFF'})`));
 });
