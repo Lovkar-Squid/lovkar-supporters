@@ -637,10 +637,20 @@ app.post('/webhook/patreon', async (req, res) => {
     if (!patreonUserId) return res.status(200).json({ ok: true, note: 'no user id' });
     const existing = findByPatreonId(patreonUserId);
 
-    if (trigger.includes('delete') || patronStatus === 'former_patron' || !tier) {
+    // With members:update on, a payload can arrive that simply does not mention tiers. Only treat "no tier"
+    // as the end of a pledge when the payload actually told us what they are entitled to.
+    const rel = data.relationships && data.relationships.currently_entitled_tiers;
+    const tiersKnown = !!(rel && Array.isArray(rel.data)) || included.some((x) => x.type === 'tier');
+    const ended = trigger.includes('delete') || patronStatus === 'former_patron' || (tiersKnown && !tier);
+    if (!ended && !tier) return res.status(200).json({ ok: true, note: 'no tier in payload - ignored' });
+
+    if (ended) {
       if (existing && existing.source === 'patreon') {
         // They keep what they paid for: the perks run to the end of the period, then the sweep drops them.
-        const until = paidThrough(data.attributes);
+        // A failed payment (Patreon retries for about a week) buys the same kind of grace.
+        const grace = patronStatus === 'declined_patron' ? new Date(Date.now() + 7 * 24 * 3600 * 1000).toISOString() : null;
+        const paid = paidThrough(data.attributes);
+        const until = grace && (!paid || grace > paid) ? grace : paid;
         if (until) {
           existing.expires = until;
           existing.updated = new Date().toISOString();
