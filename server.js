@@ -274,9 +274,13 @@ app.post('/webhook/patreon', async (req, res) => {
     const raw = Buffer.isBuffer(req.body) ? req.body : Buffer.from('');
     const sig = req.get('X-Patreon-Signature') || '';
     const expected = crypto.createHmac('md5', PATREON_WEBHOOK_SECRET).update(raw).digest('hex');
-    if (!sig || !safeEqual(sig, expected)) return res.status(401).json({ error: 'bad signature' });
+    if (!sig || !safeEqual(sig, expected)) {
+      console.warn(`[patreon] webhook REJECTED bad signature (event=${req.get('X-Patreon-Event') || '?'}, bytes=${raw.length})`);
+      return res.status(401).json({ error: 'bad signature' });
+    }
 
     const trigger = req.get('X-Patreon-Event') || '';
+    console.log(`[patreon] webhook OK event=${trigger} bytes=${raw.length}`);
     const body = JSON.parse(raw.toString('utf8'));
     const data = body.data || {};
     const included = Array.isArray(body.included) ? body.included : [];
