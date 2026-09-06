@@ -1,0 +1,17 @@
+{
+  "name": "lovkar-supporters",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Supporter list API for Lovkar's Minecraft mods (Patreon tiers -> cosmetic in-game perks).",
+  "main": "server.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "express": "^4.21.2"
+  }
+}

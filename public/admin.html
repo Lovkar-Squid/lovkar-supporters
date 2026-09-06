@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Lovkar Supporters</title>
+<style>
+  :root{
+    --bg:#0b0e12; --panel:#141a21; --line:#232d38; --txt:#e8edf2; --dim:#8a97a6;
+    --waker:#39ff14; --colossus:#ff9628; --titan:#be5aff; --danger:#ff5964;
+    --accent:#39c6ff;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--txt);font:15px/1.5 system-ui,Segoe UI,Roboto,sans-serif}
+  header{padding:22px 20px 10px;max-width:820px;margin:0 auto}
+  h1{margin:0;font-size:22px;letter-spacing:.3px}
+  .sub{color:var(--dim);font-size:13px;margin-top:4px}
+  main{max-width:820px;margin:0 auto;padding:10px 20px 60px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px;margin:14px 0}
+  label{display:block;font-size:12px;color:var(--dim);margin:0 0 4px}
+  input,select{width:100%;padding:9px 11px;background:#0e141a;border:1px solid var(--line);border-radius:8px;color:var(--txt);font-size:14px}
+  .row{display:flex;gap:12px;flex-wrap:wrap}
+  .row>div{flex:1;min-width:150px}
+  button{cursor:pointer;border:0;border-radius:8px;padding:9px 16px;font-size:14px;font-weight:600;background:var(--accent);color:#04212e}
+  button.ghost{background:transparent;border:1px solid var(--line);color:var(--txt)}
+  button.del{background:transparent;border:1px solid var(--line);color:var(--danger);padding:5px 10px;font-size:12px}
+  table{width:100%;border-collapse:collapse;margin-top:6px}
+  th,td{text-align:left;padding:8px 6px;border-bottom:1px solid var(--line);font-size:14px}
+  th{color:var(--dim);font-weight:600;font-size:12px}
+  .tier{font-weight:700;text-transform:uppercase;font-size:12px;letter-spacing:.4px}
+  .tier.waker{color:var(--waker)} .tier.colossus{color:var(--colossus)} .tier.titan{color:var(--titan)}
+  .msg{padding:9px 12px;border-radius:8px;font-size:13px;margin-top:10px;display:none}
+  .msg.ok{display:block;background:#0f2a16;color:#8effa6;border:1px solid #1c5a2e}
+  .msg.err{display:block;background:#2a0f12;color:#ff9aa2;border:1px solid #5a1c22}
+  .uuid{color:var(--dim);font-family:ui-monospace,Consolas,monospace;font-size:11px}
+  .foot{color:var(--dim);font-size:12px;margin-top:18px}
+  code{background:#0e141a;border:1px solid var(--line);border-radius:5px;padding:1px 5px;font-size:12px}
+  a{color:var(--accent)}
+</style>
+</head>
+<body>
+<header>
+  <h1>🗿 Lovkar Supporters</h1>
+  <div class="sub">Patreon supporters &rarr; cosmetic in-game perks. Add a Minecraft username, pick the tier, done.</div>
+</header>
+<main>
+  <div class="card">
+    <label>Admin token</label>
+    <div class="row">
+      <div style="flex:3"><input id="token" type="password" placeholder="paste your ADMIN_TOKEN" autocomplete="off" /></div>
+      <div style="flex:0 0 auto"><button id="save-token" class="ghost">Remember</button></div>
+    </div>
+    <div id="auth-msg" class="msg"></div>
+  </div>
+
+  <div class="card">
+    <div class="row">
+      <div style="flex:2"><label>Minecraft username</label><input id="mc" placeholder="e.g. Notch" autocomplete="off" /></div>
+      <div><label>Tier</label>
+        <select id="tier">
+          <option value="waker">Waker</option>
+          <option value="colossus">Colossus</option>
+          <option value="titan">Titan</option>
+        </select>
+      </div>
+      <div style="flex:0 0 auto;display:flex;align-items:flex-end"><button id="add">Add supporter</button></div>
+    </div>
+    <label style="margin-top:10px">Note (optional — e.g. Patreon name)</label>
+    <input id="note" placeholder="optional" autocomplete="off" />
+    <div id="add-msg" class="msg"></div>
+  </div>
+
+  <div class="card">
+    <div style="display:flex;justify-content:space-between;align-items:center">
+      <strong>Supporters (<span id="count">0</span>)</strong>
+      <button class="ghost" id="refresh">Refresh</button>
+    </div>
+    <table>
+      <thead><tr><th>Name</th><th>Tier</th><th>UUID</th><th>Note</th><th></th></tr></thead>
+      <tbody id="rows"></tbody>
+    </table>
+    <div class="foot">Mods read the public list at <code id="pub"></code> — no token needed there.</div>
+  </div>
+</main>
+<script>
+  const $ = (id) => document.getElementById(id);
+  const tokenKey = 'lovkar_admin_token';
+  $('token').value = localStorage.getItem(tokenKey) || '';
+  $('pub').textContent = location.origin + '/supporters.json';
+
+  function tok(){ return $('token').value.trim(); }
+  function headers(){ return { 'content-type':'application/json', 'x-admin-token': tok() }; }
+  function flash(el, ok, text){ el.className = 'msg ' + (ok?'ok':'err'); el.textContent = text; }
+
+  $('save-token').onclick = () => {
+    localStorage.setItem(tokenKey, tok());
+    flash($('auth-msg'), true, 'Token saved in this browser.');
+    load();
+  };
+
+  async function load(){
+    if(!tok()){ return; }
+    try{
+      const r = await fetch('/api/supporters', { headers: headers() });
+      if(r.status === 401){ flash($('auth-msg'), false, 'Token rejected.'); return; }
+      const j = await r.json();
+      flash($('auth-msg'), true, 'Connected. ' + j.supporters.length + ' supporter(s).');
+      render(j.supporters);
+    }catch(e){ flash($('auth-msg'), false, 'Cannot reach the service: ' + e.message); }
+  }
+
+  function render(list){
+    $('count').textContent = list.length;
+    const tb = $('rows'); tb.innerHTML = '';
+    list.sort((a,b)=>a.name.localeCompare(b.name)).forEach((s)=>{
+      const tr = document.createElement('tr');
+      tr.innerHTML =
+        '<td>'+esc(s.name)+'</td>'+
+        '<td><span class="tier '+s.tier+'">'+s.tier+'</span></td>'+
+        '<td class="uuid">'+esc(s.uuid)+'</td>'+
+        '<td>'+esc(s.note||'')+'</td>'+
+        '<td style="text-align:right"></td>';
+      const btn = document.createElement('button');
+      btn.className='del'; btn.textContent='remove';
+      btn.onclick = ()=>remove(s.uuid, s.name);
+      tr.lastElementChild.appendChild(btn);
+      tb.appendChild(tr);
+    });
+  }
+  function esc(s){ return String(s).replace(/[&<>"]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+
+  $('add').onclick = async () => {
+    const name = $('mc').value.trim();
+    const tier = $('tier').value;
+    const note = $('note').value.trim();
+    if(!name){ flash($('add-msg'), false, 'Enter a Minecraft username.'); return; }
+    try{
+      const r = await fetch('/api/supporters', { method:'POST', headers: headers(), body: JSON.stringify({name, tier, note}) });
+      const j = await r.json();
+      if(!r.ok){ flash($('add-msg'), false, j.error || ('error '+r.status)); return; }
+      flash($('add-msg'), true, 'Added '+j.supporter.name+' ('+j.supporter.tier+').');
+      $('mc').value=''; $('note').value='';
+      load();
+    }catch(e){ flash($('add-msg'), false, e.message); }
+  };
+
+  async function remove(uuid, name){
+    if(!confirm('Remove '+name+'?')) return;
+    try{
+      const r = await fetch('/api/supporters/'+encodeURIComponent(uuid), { method:'DELETE', headers: headers() });
+      const j = await r.json();
+      if(!r.ok){ flash($('auth-msg'), false, j.error||('error '+r.status)); return; }
+      load();
+    }catch(e){ flash($('auth-msg'), false, e.message); }
+  }
+
+  $('refresh').onclick = load;
+  $('mc').addEventListener('keydown', e=>{ if(e.key==='Enter') $('add').click(); });
+  if(tok()) load();
+</script>
+</body>
+</html>

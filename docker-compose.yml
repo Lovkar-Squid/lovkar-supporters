@@ -1,0 +1,64 @@
+name: lovkar-supporters
+
+# Two containers:
+#   lovkar-supporters : the tiny API that serves /supporters.json
+#   cloudflared       : Cloudflare Tunnel that publishes it at supporters.lovkarsquid.com
+#
+# Secrets come from environment variables (set them in Portainer's stack editor,
+# or in a .env file next to this compose). Nothing secret is committed to git.
+
+services:
+  lovkar-supporters:
+    build: .
+    image: lovkar-supporters:latest
+    container_name: lovkar-supporters
+    restart: unless-stopped
+    expose:
+      - "8080"
+    environment:
+      ADMIN_TOKEN: "${ADMIN_TOKEN}"     # required - the admin UI asks for this
+      PORT: "8080"
+      DATA_DIR: "/data"
+    volumes:
+      - lovkar-supporters-data:/data
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8080/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 4s
+      retries: 3
+    networks:
+      - lovkar
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: lovkar-cloudflared
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run
+    environment:
+      TUNNEL_TOKEN: "${TUNNEL_TOKEN}"    # from the Cloudflare Zero Trust dashboard
+    depends_on:
+      - lovkar-supporters
+    networks:
+      - lovkar
+
+networks:
+  lovkar:
+    driver: bridge
+
+volumes:
+  lovkar-supporters-data:
+
+# --- CasaOS metadata (optional cosmetics if it shows in the CasaOS app grid) ---
+x-casaos:
+  main: lovkar-supporters
+  description:
+    en_us: "Supporter list for Lovkar's Minecraft mods - serves /supporters.json for cosmetic in-game perks."
+  tagline:
+    en_us: "Patreon supporters -> in-game perks"
+  developer: "Lovkar"
+  author: "Lovkar & Claude"
+  category: "Games"
+  scheme: "http"
+  index: "/"
+  title:
+    en_us: "Lovkar Supporters"
