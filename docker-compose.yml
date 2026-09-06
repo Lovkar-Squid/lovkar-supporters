@@ -19,6 +19,10 @@ services:
       ADMIN_TOKEN: "${ADMIN_TOKEN}"     # required - the admin UI asks for this
       PORT: "8080"
       DATA_DIR: "/data"
+      PATREON_CLIENT_ID: "${PATREON_CLIENT_ID:-}"
+      PATREON_CLIENT_SECRET: "${PATREON_CLIENT_SECRET:-}"
+      PATREON_WEBHOOK_SECRET: "${PATREON_WEBHOOK_SECRET:-}"
+      PUBLIC_BASE_URL: "${PUBLIC_BASE_URL:-https://supporters.lovkarsquid.com}"
     volumes:
       - lovkar-supporters-data:/data
     healthcheck:
