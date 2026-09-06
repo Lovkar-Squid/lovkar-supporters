@@ -25,6 +25,7 @@ services:
       PUBLIC_BASE_URL: "${PUBLIC_BASE_URL:-https://supporters.lovkarsquid.com}"
       REQUIRE_MC_VERIFY: "${REQUIRE_MC_VERIFY:-1}"
       LINK_SECRET: "${LINK_SECRET:-}"
+      PATREON_URL: "${PATREON_URL:-https://www.patreon.com/Lovkar}"
     volumes:
       - lovkar-supporters-data:/data
     healthcheck:

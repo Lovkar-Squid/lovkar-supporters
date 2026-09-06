@@ -112,6 +112,8 @@ docker compose up -d --build
 Optional environment: `REQUIRE_MC_VERIFY=0` turns the Mojang ownership check
 off (offline development only); `LINK_SECRET` pins the key that signs the
 chooser tokens (random per start otherwise - tokens live 30 minutes anyway).
+`PATREON_URL` is the public Patreon page the link pages point at (default
+https://www.patreon.com/Lovkar).
 
 ## Tiers
 

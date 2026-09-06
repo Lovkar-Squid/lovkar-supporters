@@ -96,6 +96,7 @@ if (!ADMIN_TOKEN || ADMIN_TOKEN.length < 12) {
   process.exit(1);
 }
 const PATREON_ENABLED = !!(PATREON_CLIENT_ID && PATREON_CLIENT_SECRET);
+const PATREON_URL = process.env.PATREON_URL || 'https://www.patreon.com/Lovkar'; // where the tiers live; shown on the pages
 
 // ---------- storage ----------
 function emptyStore() {
@@ -310,7 +311,8 @@ const PAGE_CSS = `body{margin:0;background:#0b0e12;color:#e8edf2;font:16px/1.6 s
 .card{max-width:560px;padding:34px;background:#141a21;border:1px solid #232d38;border-radius:14px;text-align:center;margin:20px}
 h1{margin:0 0 10px;font-size:22px}.t{font-weight:800;text-transform:uppercase;letter-spacing:.5px}
 .waker{color:#39ff14}.colossus{color:#ff9628}.titan{color:#be5aff}.muted{color:#8a97a6}.big{font-size:40px;margin-bottom:6px}
-code{background:#0e141a;border:1px solid #232d38;border-radius:5px;padding:1px 6px}`;
+code{background:#0e141a;border:1px solid #232d38;border-radius:5px;padding:1px 6px}
+a{color:#39c6ff}`;
 
 function page(title, bodyHtml) {
   return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(title)}</title>
@@ -361,7 +363,7 @@ h2.sec{font-size:15px;margin:22px 0 -6px;color:#c9d3de;letter-spacing:.3px}.smal
   <button id="save">Save</button>
 </div>
 <div id="msg" class="msg"></div>
-<p class="fine">Changes show in game within a few minutes (or at once with <code>/wwpatreon refresh</code>). To change later, run <code>/wwpatreon</code> again, or in the game <code>/wwpatreon aura &lt;name&gt;</code> and <code>/wwpatreon colossus &lt;name&gt;</code>. Locked looks belong to higher tiers - upgrading on Patreon unlocks them.</p>
+<p class="fine">Changes show in game within a few minutes (or at once with <code>/wwpatreon refresh</code>). To change later, run <code>/wwpatreon</code> again, or in the game <code>/wwpatreon aura &lt;name&gt;</code> and <code>/wwpatreon colossus &lt;name&gt;</code>. Locked looks belong to higher tiers - upgrading at <a href="${esc(PATREON_URL)}">${esc(PATREON_URL.replace(/^https?:\/\/(www\.)?/, ''))}</a> unlocks them.</p>
 </div>
 <script>
 const CTX = ${json};
@@ -489,7 +491,8 @@ app.get('/link/callback', async (req, res) => {
       const existing = findByPatreonId(patreonUserId);
       if (existing && existing.source === 'patreon') { store.supporters = store.supporters.filter((s) => s !== existing); await saveStore(); }
       return res.status(200).send(page('No active pledge', `<div class="big">🙂</div><h1>No active pledge found</h1>
-        <p class="muted">We couldn't find an active Waker / Colossus / Titan pledge on your Patreon. If you just pledged, give it a minute and try again.</p>`));
+        <p class="muted">We couldn't find an active Waker / Colossus / Titan pledge on your Patreon. If you just pledged, give it a minute and try again.</p>
+        <p class="muted">The tiers are at <a href="${esc(PATREON_URL)}">${esc(PATREON_URL.replace(/^https?:\/\/(www\.)?/, ''))}</a> - every perk is cosmetic; the mod itself is free.</p>`));
     }
 
     // Detach this Patreon id from any other MC account, then link to this one (keeping a chosen style if the account already had one).
