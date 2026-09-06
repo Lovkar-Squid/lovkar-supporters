@@ -6,7 +6,7 @@
  * so the mods can grant COSMETIC-ONLY in-game perks. Nothing here touches gameplay.
  *
  * Public:
- *   GET  /supporters.json     -> { v: 2, salt, supporters: [ { h, tier, aura } ] }
+ *   GET  /supporters.json     -> { v: 2, salt, supporters: [ { h, tier, aura, colossus } ] }
  *                                h = sha256(salt + ":" + uuid) - the list names nobody; a mod
  *                                hashes the players it meets and looks them up.
  *   GET  /credits.json        -> names of supporters who OPTED IN to be credited, by tier
@@ -15,8 +15,9 @@
  *                                telling Mojang's session server it is "joining" a one-off server id;
  *                                we ask Mojang whether that account really did -> proof of ownership)
  *   GET  /link/callback       -> Patreon OAuth callback: stores UUID<->tier, shows the aura chooser
- *   POST /link/style          -> { token, aura, credits } saves the chooser (token from the callback page;
- *                                the aura is checked against the tier that paid for it)
+ *   POST /link/style          -> { token, aura, colossus, credits } saves the chooser (token from the callback page;
+ *                                every choice is checked against the tier that paid for it)
+ *   POST /api/me/cosmetics    -> { uuid, name, sid, aura?, colossus? } from the game: Mojang-verified, same checks
  *   POST /webhook/patreon     -> Patreon webhook, HMAC-verified, auto-syncs tiers
  *
  * Admin (header x-admin-token: <ADMIN_TOKEN>, or ?token=):
@@ -59,6 +60,23 @@ const AURAS = [
 const AURA_BY_ID = Object.fromEntries(AURAS.map((a) => [a.id, a]));
 function defaultAura(tier) { return TIER_RANK[tier] >= 3 ? 'titan' : TIER_RANK[tier] === 2 ? 'colossus' : 'waker'; }
 function auraAllowed(tier, auraId) { const a = AURA_BY_ID[auraId]; return !!a && a.rank <= (TIER_RANK[tier] || 0); }
+
+// The looks a supporter's colossi wear (the giants their rites wake). Mirrored in the mod (ColossusStyle.java).
+// A style swaps blocks and glow; the silhouette and the hit boxes stay the land's own. The Titan is never dressed.
+const COLOSSI = [
+  { id: 'none', rank: 0, name: 'The land\'s own', blurb: 'Your colossi rise as they always have - built from the ground they wake in.', color: '#8a97a6' },
+  { id: 'sentinel', rank: 2, name: 'The Sentinel', blurb: 'A war machine of blackstone and iron: glowing seams at every joint, a visor for eyes.', color: '#a8f0ff' },
+  { id: 'eldest', rank: 2, name: 'The Eldest', blurb: 'A shrine guardian of deepslate, its old carvings picked out in gold light, moss in the cracks.', color: '#ffd24a' },
+  { id: 'seraph', rank: 3, name: 'The Seraph', blurb: 'Sleek white plating with violet light along its edges, a visor, and lit horns.', color: '#c88cff' },
+];
+const COLOSSUS_BY_ID = Object.fromEntries(COLOSSI.map((c) => [c.id, c]));
+function colossusAllowed(tier, id) { const c = COLOSSUS_BY_ID[id]; return !!c && c.rank <= (TIER_RANK[tier] || 0); }
+function tierNeeded(rank) { return TIER_LABEL[TIERS[rank - 1]] || ''; }
+function unlockedFor(tier) {
+  const r = TIER_RANK[tier] || 0;
+  return { auras: AURAS.filter((a) => a.rank <= r).map((a) => a.id), colossi: COLOSSI.filter((c) => c.rank <= r).map((c) => c.id) };
+}
+function publicEntry(s) { return { tier: s.tier, aura: s.style.aura, colossus: s.style.colossus, unlocked: unlockedFor(s.tier) }; }
 
 // --- Patreon config (all optional; linking is disabled until these are set) ---
 const PATREON_CLIENT_ID = process.env.PATREON_CLIENT_ID || '';
@@ -123,6 +141,7 @@ async function saveStore() {
 function normalizeSupporter(s) {
   if (!s.style || typeof s.style !== 'object') s.style = {};
   if (!s.style.aura || !auraAllowed(s.tier, s.style.aura)) s.style.aura = defaultAura(s.tier);
+  if (!s.style.colossus || !colossusAllowed(s.tier, s.style.colossus)) s.style.colossus = 'none';
   if (typeof s.credits !== 'boolean') s.credits = false;
   if (typeof s.verified !== 'boolean') s.verified = s.source === 'manual';
   return s;
@@ -264,7 +283,7 @@ app.get('/supporters.json', (req, res) => {
     v: 2,
     updated: store.updated,
     salt: store.salt,
-    supporters: store.supporters.map((s) => ({ h: hashOf(s.uuidRaw), tier: s.tier, aura: s.style.aura })),
+    supporters: store.supporters.map((s) => ({ h: hashOf(s.uuidRaw), tier: s.tier, aura: s.style.aura, colossus: s.style.colossus })),
   });
 });
 
@@ -301,8 +320,9 @@ function page(title, bodyHtml) {
 // The page after a successful link: pick an aura (only what the tier unlocks), opt into the credits.
 function chooserPage(s, token) {
   const rank = TIER_RANK[s.tier] || 0;
-  const ctx = { token, tier: s.tier, tierLabel: TIER_LABEL[s.tier], rank, name: s.name, aura: s.style.aura, credits: !!s.credits,
-    auras: AURAS.map((a) => ({ ...a, locked: a.rank > rank, needs: TIER_LABEL[TIERS[a.rank - 1]] || '' })) };
+  const ctx = { token, tier: s.tier, tierLabel: TIER_LABEL[s.tier], rank, name: s.name, aura: s.style.aura, colossus: s.style.colossus, credits: !!s.credits,
+    auras: AURAS.map((a) => ({ ...a, locked: a.rank > rank, needs: tierNeeded(a.rank) })),
+    colossi: COLOSSI.map((c) => ({ ...c, locked: c.rank > rank, needs: tierNeeded(c.rank) })) };
   const json = JSON.stringify(ctx).replace(/</g, '\\u003c');
   return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Linked - choose your aura</title>
 <style>${PAGE_CSS}
@@ -325,35 +345,44 @@ button:disabled{opacity:.55;cursor:default}
 .msg{margin-top:14px;padding:10px 12px;border-radius:9px;font-size:14px;display:none}
 .msg.ok{display:block;background:#0f2a16;color:#8effa6;border:1px solid #1c5a2e}.msg.err{display:block;background:#2a0f12;color:#ff9aa2;border:1px solid #5a1c22}
 .fine{color:#6f7d8c;font-size:12px;margin-top:18px;text-align:center}
+h2.sec{font-size:15px;margin:22px 0 -6px;color:#c9d3de;letter-spacing:.3px}.small{font-size:13px;margin:12px 0 -8px}
 </style></head><body><div class="card">
 <div class="head"><div class="big">🗿</div>
 <h1>Linked — welcome, <span class="t ${esc(s.tier)}">${esc(TIER_LABEL[s.tier] || s.tier)}</span>!</h1>
 <p>Your Minecraft account <b>${esc(s.name || s.uuid)}</b> is connected to your Patreon. Thank you for keeping the world waking.</p>
-<p class="muted" style="margin-top:-6px">Now choose your aura. Everything here is purely cosmetic - it changes nothing about the game itself.</p></div>
+<p class="muted" style="margin-top:-6px">Now choose your look. Everything here is purely cosmetic - it changes nothing about the game itself.</p></div>
+<h2 class="sec">Your aura</h2>
 <div id="grid" class="grid"></div>
+<h2 class="sec">Your colossi</h2>
+<p class="muted small">The giants <b>your</b> rites wake rise dressed in this style - same shape, same fight, other stone. The Titan keeps its own look.</p>
+<div id="grid2" class="grid"></div>
 <div class="row">
   <label class="ck"><input type="checkbox" id="credits"><span>List my Minecraft name in the <b>supporter credits</b> (public). Off by default - nobody's name is published unless they tick this.</span></label>
   <button id="save">Save</button>
 </div>
 <div id="msg" class="msg"></div>
-<p class="fine">Changes show in game within about five minutes. To change your aura later, run <code>/wwpatreon</code> in the game again. Locked auras belong to higher tiers - upgrading on Patreon unlocks them.</p>
+<p class="fine">Changes show in game within a few minutes (or at once with <code>/wwpatreon refresh</code>). To change later, run <code>/wwpatreon</code> again, or in the game <code>/wwpatreon aura &lt;name&gt;</code> and <code>/wwpatreon colossus &lt;name&gt;</code>. Locked looks belong to higher tiers - upgrading on Patreon unlocks them.</p>
 </div>
 <script>
 const CTX = ${json};
-const grid = document.getElementById('grid');
-let chosen = CTX.aura;
-function draw(){
+let chosen = CTX.aura, chosenColossus = CTX.colossus;
+function drawGrid(id, items, current, pick){
+  const grid = document.getElementById(id);
   grid.innerHTML = '';
-  for (const a of CTX.auras) {
+  for (const a of items) {
     const el = document.createElement('label');
-    el.className = 'opt' + (a.locked ? ' locked' : '') + (a.id === chosen ? ' sel' : '') + (a.id === 'none' ? ' none' : '');
+    el.className = 'opt' + (a.locked ? ' locked' : '') + (a.id === current ? ' sel' : '') + (a.id === 'none' ? ' none' : '');
     el.style.setProperty('--c', a.color);
     el.innerHTML = '<span class="sw"></span><div class="nm">' + a.name + '</div><div class="bl">' + a.blurb + (a.pattern ? ' <i>(' + a.pattern + ')</i>' : '') + '</div>'
       + (a.rank > 0 ? '<span class="tag ' + ['','waker','colossus','titan'][a.rank] + '">' + a.needs + (a.locked ? ' tier' : '') + '</span>' : '')
       + (a.locked ? '<span class="lock">🔒</span>' : '');
-    if (!a.locked) el.onclick = () => { chosen = a.id; draw(); };
+    if (!a.locked) el.onclick = () => pick(a.id);
     grid.appendChild(el);
   }
+}
+function draw(){
+  drawGrid('grid', CTX.auras, chosen, (id) => { chosen = id; draw(); });
+  drawGrid('grid2', CTX.colossi, chosenColossus, (id) => { chosenColossus = id; draw(); });
 }
 draw();
 document.getElementById('credits').checked = CTX.credits;
@@ -362,10 +391,10 @@ document.getElementById('save').onclick = async () => {
   const btn = document.getElementById('save'); btn.disabled = true; msg.className = 'msg';
   try {
     const r = await fetch('/link/style', { method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ token: CTX.token, aura: chosen, credits: document.getElementById('credits').checked }) });
+      body: JSON.stringify({ token: CTX.token, aura: chosen, colossus: chosenColossus, credits: document.getElementById('credits').checked }) });
     const j = await r.json();
     if (!r.ok) { msg.className = 'msg err'; msg.textContent = j.error || ('error ' + r.status); }
-    else { msg.className = 'msg ok'; msg.textContent = 'Saved: ' + (CTX.auras.find(a => a.id === j.aura) || {}).name + (j.credits ? ' - and you are in the credits.' : '.') + ' See you in the game!'; }
+    else { msg.className = 'msg ok'; msg.textContent = 'Saved: ' + (CTX.auras.find(a => a.id === j.aura) || {}).name + ' / ' + (CTX.colossi.find(c => c.id === j.colossus) || {}).name + (j.credits ? ' - and you are in the credits.' : '.') + ' See you in the game!'; }
   } catch (e) { msg.className = 'msg err'; msg.textContent = 'Could not save: ' + e.message; }
   btn.disabled = false;
 };
@@ -485,13 +514,62 @@ app.post('/link/style', async (req, res) => {
   if (!s) return res.status(404).json({ error: 'No supporter record for this account any more.' });
   const aura = String((req.body && req.body.aura) || '').trim().toLowerCase();
   if (!AURA_BY_ID[aura]) return res.status(400).json({ error: 'Unknown aura.' });
-  if (!auraAllowed(s.tier, aura)) return res.status(403).json({ error: `${AURA_BY_ID[aura].name} needs the ${TIER_LABEL[TIERS[AURA_BY_ID[aura].rank - 1]]} tier.` });
+  if (!auraAllowed(s.tier, aura)) return res.status(403).json({ error: `${AURA_BY_ID[aura].name} needs the ${tierNeeded(AURA_BY_ID[aura].rank)} tier.` });
+  const colossus = String((req.body && req.body.colossus) || s.style.colossus || 'none').trim().toLowerCase();
+  if (!COLOSSUS_BY_ID[colossus]) return res.status(400).json({ error: 'Unknown colossus style.' });
+  if (!colossusAllowed(s.tier, colossus)) return res.status(403).json({ error: `${COLOSSUS_BY_ID[colossus].name} needs the ${tierNeeded(COLOSSUS_BY_ID[colossus].rank)} tier.` });
   s.style.aura = aura;
+  s.style.colossus = colossus;
   s.credits = !!(req.body && req.body.credits === true);
   s.updated = new Date().toISOString();
   await saveStore();
-  console.log(`[style] ${s.name} (${s.uuid}) aura=${aura} credits=${s.credits}`);
-  res.json({ ok: true, aura: s.style.aura, credits: s.credits });
+  console.log(`[style] ${s.name} (${s.uuid}) aura=${aura} colossus=${colossus} credits=${s.credits}`);
+  res.json({ ok: true, aura: s.style.aura, colossus: s.style.colossus, credits: s.credits });
+});
+
+// From the game: read or change one's own cosmetics. The client first "joins" a one-off server id at Mojang and
+// sends it along; we ask Mojang whether this account really did (proof of ownership), then the tier on file decides.
+//   POST /api/me/cosmetics  { uuid, name, sid, aura?, colossus? }  ->  { ok, tier, aura, colossus, unlocked }
+app.post('/api/me/cosmetics', async (req, res) => {
+  if (limited(req, 'me', 20, 60 * 1000)) return res.status(429).json({ error: 'Too many requests - wait a minute.' });
+  const b = req.body || {};
+  const uuid = String(b.uuid || '');
+  const name = String(b.name || '').slice(0, 16);
+  const sid = String(b.sid || '');
+  if (!validUuid(uuid)) return res.status(400).json({ error: 'Invalid Minecraft UUID.' });
+  const uuidRaw = uuid.replace(/-/g, '').toLowerCase();
+  let verified = false;
+  if (/^[0-9a-f]{16,64}$/i.test(sid) && /^[A-Za-z0-9_]{1,16}$/.test(name)) {
+    try {
+      const j = await verifyMojangJoin(name, sid);
+      verified = !!(j && j.uuidRaw === uuidRaw);
+    } catch (e) {
+      console.warn('[me] Mojang session check failed:', e.message);
+      return res.status(502).json({ error: 'Could not reach Mojang to confirm your account - try again in a moment.' });
+    }
+  }
+  if (!verified && REQUIRE_MC_VERIFY) return res.status(403).json({ error: "Mojang couldn't confirm your account (offline mode?). Log in with your Microsoft account and try again." });
+  const s = findByUuid(uuidRaw);
+  if (!s) return res.status(404).json({ error: 'This Minecraft account is not linked to a Patreon yet - run /wwpatreon to link it.' });
+  let changed = false;
+  if (typeof b.aura === 'string' && b.aura.trim()) {
+    const aura = b.aura.trim().toLowerCase();
+    if (!AURA_BY_ID[aura]) return res.status(400).json({ error: 'Unknown aura: ' + aura });
+    if (!auraAllowed(s.tier, aura)) return res.status(403).json({ error: `${AURA_BY_ID[aura].name} needs the ${tierNeeded(AURA_BY_ID[aura].rank)} tier.` });
+    s.style.aura = aura; changed = true;
+  }
+  if (typeof b.colossus === 'string' && b.colossus.trim()) {
+    const colossus = b.colossus.trim().toLowerCase();
+    if (!COLOSSUS_BY_ID[colossus]) return res.status(400).json({ error: 'Unknown colossus style: ' + colossus });
+    if (!colossusAllowed(s.tier, colossus)) return res.status(403).json({ error: `${COLOSSUS_BY_ID[colossus].name} needs the ${tierNeeded(COLOSSUS_BY_ID[colossus].rank)} tier.` });
+    s.style.colossus = colossus; changed = true;
+  }
+  if (changed) {
+    s.updated = new Date().toISOString();
+    await saveStore();
+    console.log(`[me] ${s.name} (${s.uuid}) aura=${s.style.aura} colossus=${s.style.colossus}`);
+  }
+  res.json({ ok: true, ...publicEntry(s) });
 });
 
 // Step 3: Patreon webhook keeps tiers in sync (pledge create/update/delete).
@@ -539,7 +617,7 @@ app.post('/webhook/patreon', async (req, res) => {
 });
 
 // ---------- admin ----------
-app.get('/api/supporters', requireAdmin, (req, res) => res.json({ updated: store.updated, auras: AURAS, supporters: store.supporters }));
+app.get('/api/supporters', requireAdmin, (req, res) => res.json({ updated: store.updated, auras: AURAS, colossi: COLOSSI, supporters: store.supporters }));
 
 app.post('/api/supporters', requireAdmin, async (req, res) => {
   const name = (req.body && req.body.name ? String(req.body.name) : '').trim();
@@ -567,10 +645,16 @@ app.patch('/api/supporters/:key', requireAdmin, async (req, res) => {
     if (!auraAllowed(s.tier, aura)) return res.status(403).json({ error: 'that aura is above this supporter\'s tier' });
     s.style.aura = aura;
   }
+  if (req.body && typeof req.body.colossus === 'string') {
+    const c = req.body.colossus.trim().toLowerCase();
+    if (!COLOSSUS_BY_ID[c]) return res.status(400).json({ error: 'unknown colossus style' });
+    if (!colossusAllowed(s.tier, c)) return res.status(403).json({ error: 'that colossus style is above this supporter\'s tier' });
+    s.style.colossus = c;
+  }
   if (req.body && typeof req.body.credits === 'boolean') s.credits = req.body.credits;
   s.updated = new Date().toISOString();
   await saveStore();
-  res.json({ ok: true, supporter: { uuid: s.uuid, name: s.name, tier: s.tier, aura: s.style.aura, credits: s.credits } });
+  res.json({ ok: true, supporter: { uuid: s.uuid, name: s.name, tier: s.tier, aura: s.style.aura, colossus: s.style.colossus, credits: s.credits } });
 });
 
 // Admin: see the chooser page as a given supporter would (the token it carries is real, so saves from it apply).

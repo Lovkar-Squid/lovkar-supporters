@@ -33,7 +33,7 @@ draws what the list says.
 Public (what the mods fetch):
 
 - `GET /supporters.json` →
-  `{ "v": 2, "updated": "...", "salt": "...", "supporters": [ { "h", "tier", "aura" } ] }`
+  `{ "v": 2, "updated": "...", "salt": "...", "supporters": [ { "h", "tier", "aura", "colossus" } ] }`
   where `h = sha256(salt + ":" + uuid)` (lower-case, dashed uuid). The list
   names nobody: a mod hashes the players it meets and looks them up.
 - `GET /credits.json` → `{ "credits": { "titan": [names], "colossus": [...], "waker": [...] } }`
@@ -41,8 +41,11 @@ Public (what the mods fetch):
 - `GET /healthz` → `{ "ok": true, "count": N, "patreon": true|false, "verify": true|false }`
 - `GET /link/start?uuid=&name=&sid=` → verifies with Mojang, redirects to Patreon
 - `GET /link/callback` → Patreon OAuth callback, then the chooser page
-- `POST /link/style` → `{ token, aura, credits }` from the chooser page
-  (the token is signed and short-lived; the aura is checked against the tier)
+- `POST /link/style` → `{ token, aura, colossus, credits }` from the chooser page
+  (the token is signed and short-lived; every choice is checked against the tier)
+- `POST /api/me/cosmetics` → `{ uuid, name, sid, aura?, colossus? }` from the game
+  (`/wwpatreon aura <name>`, `/wwpatreon colossus <name>`): Mojang confirms the
+  account via `sid`, the tier on file decides; answers the current entry + what is unlocked
 - `POST /webhook/patreon` → Patreon webhook
 
 Admin (needs the header `x-admin-token: <ADMIN_TOKEN>`, or `?token=`):
@@ -52,7 +55,7 @@ Admin (needs the header `x-admin-token: <ADMIN_TOKEN>`, or `?token=`):
 - `GET /api/supporters` → full list (+ the aura catalogue)
 - `POST /api/supporters` → body `{ "name": "<MC username>", "tier": "waker|colossus|titan", "note": "" }`
   (the service resolves the UUID from Mojang automatically)
-- `PATCH /api/supporters/:key` → `{ "aura": "...", "credits": true|false }`
+- `PATCH /api/supporters/:key` → `{ "aura": "...", "colossus": "...", "credits": true|false }`
 - `DELETE /api/supporters/:key` → remove by uuid or name
 - `GET /api/chooser/:key` → the chooser page as that supporter would see it
 
@@ -72,6 +75,20 @@ container recreation.
 
 The catalogue is mirrored in the mod (`AuraStyle.java`); the service decides,
 the mod draws.
+
+## Colossus styles
+
+The giants a supporter's rites wake rise dressed in the style they chose - the
+same shape and hit boxes, other blocks and glow. The Titan is never dressed.
+
+| id | unlocked by | what it is |
+| --- | --- | --- |
+| `none` | everyone | the land's own stone |
+| `sentinel` | Colossus | blackstone and iron, sea-lantern seams at the joints, a visor |
+| `eldest` | Colossus | deepslate with gold-lit carvings and a little moss |
+| `seraph` | Titan | white quartz plating, crying-obsidian light along the edges, a visor, lit horns |
+
+Mirrored in the mod as `ColossusStyle.java`.
 
 ## Run it (Docker Compose)
 
