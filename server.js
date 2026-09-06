@@ -17,7 +17,7 @@
  *   GET  /link/callback       -> Patreon OAuth callback: stores UUID<->tier, shows the aura chooser
  *   POST /link/style          -> { token, aura, colossus, credits } saves the chooser (token from the callback page;
  *                                every choice is checked against the tier that paid for it)
- *   POST /api/me/cosmetics    -> { uuid, name, sid, aura?, colossus? } from the game: Mojang-verified, same checks
+ *   POST /api/me/cosmetics    -> { uuid, name, sid, aura?, colossus?, credits? } from the game: Mojang-verified, same checks
  *   POST /webhook/patreon     -> Patreon webhook, HMAC-verified, auto-syncs tiers
  *
  * Admin (header x-admin-token: <ADMIN_TOKEN>, or ?token=):
@@ -564,12 +564,13 @@ app.post('/api/me/cosmetics', async (req, res) => {
     if (!colossusAllowed(s.tier, colossus)) return res.status(403).json({ error: `${COLOSSUS_BY_ID[colossus].name} needs the ${tierNeeded(COLOSSUS_BY_ID[colossus].rank)} tier.` });
     s.style.colossus = colossus; changed = true;
   }
+  if (typeof b.credits === 'boolean') { s.credits = b.credits; changed = true; } // the Hall of Wakers: their name, their call
   if (changed) {
     s.updated = new Date().toISOString();
     await saveStore();
-    console.log(`[me] ${s.name} (${s.uuid}) aura=${s.style.aura} colossus=${s.style.colossus}`);
+    console.log(`[me] ${s.name} (${s.uuid}) aura=${s.style.aura} colossus=${s.style.colossus} credits=${s.credits}`);
   }
-  res.json({ ok: true, ...publicEntry(s) });
+  res.json({ ok: true, ...publicEntry(s), credits: !!s.credits, name: s.name });
 });
 
 // Step 3: Patreon webhook keeps tiers in sync (pledge create/update/delete).

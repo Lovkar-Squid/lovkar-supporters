@@ -43,9 +43,10 @@ Public (what the mods fetch):
 - `GET /link/callback` → Patreon OAuth callback, then the chooser page
 - `POST /link/style` → `{ token, aura, colossus, credits }` from the chooser page
   (the token is signed and short-lived; every choice is checked against the tier)
-- `POST /api/me/cosmetics` → `{ uuid, name, sid, aura?, colossus? }` from the game
-  (`/wwpatreon aura <name>`, `/wwpatreon colossus <name>`): Mojang confirms the
-  account via `sid`, the tier on file decides; answers the current entry + what is unlocked
+- `POST /api/me/cosmetics` → `{ uuid, name, sid, aura?, colossus?, credits? }` from the game
+  (`/wwpatreon aura <name>`, `/wwpatreon colossus <name>`, `/wwpatreon credits on|off`,
+  `/wwpatreon status`): Mojang confirms the account via `sid`, the tier on file decides;
+  answers the current entry, the credits flag and what is unlocked
 - `POST /webhook/patreon` → Patreon webhook
 
 Admin (needs the header `x-admin-token: <ADMIN_TOKEN>`, or `?token=`):
