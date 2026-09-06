@@ -205,7 +205,7 @@ app.delete('/api/supporters/:key', requireAdmin, async (req, res) => {
 });
 
 // Admin UI + static
-app.use(express.static(path.join(__dirname, 'public')));
+app.use(express.static(path.join(__dirname, 'public'), { index: 'admin.html' }));
 
 loadStore().then(() => {
   app.listen(PORT, () => {
